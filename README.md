@@ -3,7 +3,7 @@
 Logs Google Nest thermostats (Google SDM API) to SQLite and serves a chart UI.
 
 - `nest-logger` — Pub/Sub events in real time + a poll every 30 min → `data/nest.db`
-- `nest-web` — chart page + JSON API on `nest-web:8087` (caddy_network) → https://nest.tengs.ca
+- `nest-web` — chart page + JSON API on `nest-web:8087` (caddy_network) → https://nest.tengs.ca (LAN only)
 
 ## Files
 - `.env` — OAuth client id/secret, SDM project id, Pub/Sub subscription (see `.env.example`)

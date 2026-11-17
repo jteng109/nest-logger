@@ -1,5 +1,5 @@
 # Nest thermostat logger + web UI. Data (db, OAuth token, Pub/Sub key) lives in ./data.
-# Web UI: https://nest.tengs.ca (LAN: no login; external: Authelia)
+# Web UI: https://nest.tengs.ca — LAN only (Caddy refuses Cloudflare-tunnel and non-private requests)
 services:
   nest-logger:
     build: .
