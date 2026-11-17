@@ -266,9 +266,9 @@ function render() {
     type: "line",
     data: { datasets: [
       { label: "Temperature", data: pt("temp"), borderColor: css("--temp"), backgroundColor: css("--temp"),
-        borderWidth: 2, pointRadius: 0, pointHoverRadius: 5, pointHitRadius: 8, tension: 0, spanGaps: true },
+        borderWidth: 2, pointRadius: 0, pointHoverRadius: 5, pointHitRadius: 8, stepped: "after", spanGaps: true },
       { label: "Set to", data: pt("heat"), borderColor: css("--setpoint"), backgroundColor: css("--setpoint"),
-        borderWidth: 2, borderDash: [6, 4], stepped: "before", pointRadius: 0, pointHoverRadius: 5, spanGaps: true },
+        borderWidth: 2, borderDash: [6, 4], stepped: "after", pointRadius: 0, pointHoverRadius: 5, spanGaps: true },
     ] },
     options: tOpts, plugins: [bandsPlugin],
   });
@@ -279,7 +279,7 @@ function render() {
     type: "line",
     data: { datasets: [
       { label: "Humidity", data: pt("hum"), borderColor: css("--hum"), backgroundColor: css("--hum"),
-        borderWidth: 2, stepped: "before", pointRadius: 0, pointHoverRadius: 5, spanGaps: true },
+        borderWidth: 2, stepped: "after", pointRadius: 0, pointHoverRadius: 5, spanGaps: true },
     ] },
     options: hOpts, plugins: [bandsPlugin],
   });
