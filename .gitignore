@@ -1,0 +1,13 @@
+# secrets & data — never commit
+.env
+nest.env
+nest_token.json
+nest-*.json
+*-key.json
+data/
+*.db
+*.db-journal
+# local
+.venv/
+__pycache__/
+*.bak

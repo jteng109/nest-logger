@@ -1,0 +1,47 @@
+# Nest thermostat logger + web UI. Data (db, OAuth token, Pub/Sub key) lives in ./data.
+# Web UI: https://nest.tengs.ca (LAN: no login; external: Authelia)
+services:
+  nest-logger:
+    build: .
+    image: nest-logger
+    container_name: nest-logger
+    command: ["python", "nest_logger.py", "run"]
+    user: "1000:1000"
+    env_file: .env
+    environment:
+      - NEST_DB_FILE=/data/nest.db
+      - NEST_TOKEN_FILE=/data/nest_token.json
+      - GOOGLE_APPLICATION_CREDENTIALS=/data/pubsub-key.json
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  nest-web:
+    image: nest-logger
+    container_name: nest-web
+    command: ["python", "web/server.py"]
+    user: "1000:1000"
+    environment:
+      - NEST_DB_FILE=/data/nest.db
+      - NEST_WEB_HOST=0.0.0.0
+      - NEST_WEB_PORT=8087
+    volumes:
+      - ./data:/data:ro
+    # Port exposed only on caddy_network, not on host
+    networks:
+      - caddy_network
+    depends_on:
+      - nest-logger
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+networks:
+  caddy_network:
+    external: true

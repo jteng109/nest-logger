@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nest Thermostat</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7;
+    --surface: #fcfcfb;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --border: rgba(11,11,11,0.10);
+    --temp: #2a78d6;      /* series 1 */
+    --setpoint: #eb6834;  /* series 2 */
+    --hum: #1baf7a;       /* series 3 */
+    --heat-wash: rgba(227,73,72,0.13);  /* series 8 red, as a wash */
+    --heat-ink: #e34948;
+    --chip-on: #0b0b0b;
+    --chip-on-ink: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page: #0d0d0d;
+      --surface: #1a1a19;
+      --ink: #f0efec;
+      --ink-2: #c3c2b7;
+      --muted: #898781;
+      --grid: #2c2c2a;
+      --axis: #383835;
+      --border: rgba(255,255,255,0.10);
+      --temp: #3987e5;
+      --setpoint: #d95926;
+      --hum: #199e70;
+      --heat-wash: rgba(230,103,103,0.16);
+      --heat-ink: #e66767;
+      --chip-on: #f0efec;
+      --chip-on-ink: #0b0b0b;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255,255,255,0.10);
+    --temp: #3987e5;
+    --setpoint: #d95926;
+    --hum: #199e70;
+    --heat-wash: rgba(230,103,103,0.16);
+    --heat-ink: #e66767;
+    --chip-on: #f0efec;
+    --chip-on-ink: #0b0b0b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; }
+  h1 { font-size: 22px; margin: 0; font-weight: 650; }
+  .updated { color: var(--ink-2); font-size: 13px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 18px 0; }
+  .tile, .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
+  .tile { padding: 14px 16px; }
+  .tile .label { color: var(--ink-2); font-size: 13px; }
+  .tile .value { font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .tile .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .status { display: inline-flex; align-items: center; gap: 8px; }
+  .status svg { width: 22px; height: 22px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 12px; }
+  .chip {
+    font: inherit; font-size: 14px; padding: 6px 14px; border-radius: 999px; cursor: pointer;
+    background: var(--surface); color: var(--ink); border: 1px solid var(--border);
+  }
+  .chip[aria-pressed="true"] { background: var(--chip-on); color: var(--chip-on-ink); border-color: var(--chip-on); }
+  .card { padding: 16px 16px 10px; margin-bottom: 14px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; font-weight: 600; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--ink-2); font-size: 13px; margin-bottom: 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw-line { width: 18px; height: 0; border-top: 2px solid; }
+  .sw-dash { width: 18px; height: 0; border-top: 2px dashed; }
+  .sw-wash { width: 14px; height: 12px; border-radius: 3px; }
+  .chart { position: relative; height: 320px; }
+  .chart.small { height: 200px; }
+  .empty { color: var(--ink-2); padding: 40px 0; text-align: center; }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--ink-2); font-size: 14px; }
+  .table-wrap { overflow-x: auto; margin-top: 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  th { color: var(--ink-2); font-weight: 600; }
+  .err { color: var(--heat-ink); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="title">Thermostat</h1>
+    <div class="updated" id="updated">Loading…</div>
+  </header>
+
+  <section class="tiles" aria-label="Current state">
+    <div class="tile"><div class="label">Temperature</div><div class="value" id="t-temp">–</div><div class="sub">active sensor</div></div>
+    <div class="tile"><div class="label">Set to</div><div class="value" id="t-sp">–</div><div class="sub" id="t-mode">&nbsp;</div></div>
+    <div class="tile"><div class="label">Status</div><div class="value status" id="t-status">–</div><div class="sub" id="t-since">&nbsp;</div></div>
+    <div class="tile"><div class="label">Humidity</div><div class="value" id="t-hum">–</div><div class="sub">at thermostat</div></div>
+    <div class="tile"><div class="label">Heating time</div><div class="value" id="t-heat">–</div><div class="sub" id="t-heat-sub">&nbsp;</div></div>
+  </section>
+
+  <div class="controls" role="group" aria-label="Time range">
+    <button class="chip" data-hours="24" aria-pressed="true">24 hours</button>
+    <button class="chip" data-hours="168" aria-pressed="false">7 days</button>
+    <button class="chip" data-hours="720" aria-pressed="false">30 days</button>
+  </div>
+
+  <div class="empty" id="empty" hidden>No readings in this range yet.</div>
+
+  <section class="card">
+    <h2>Temperature (°C)</h2>
+    <div class="legend">
+      <span><i class="sw-line" style="border-color:var(--temp)"></i>Temperature</span>
+      <span><i class="sw-dash" style="border-color:var(--setpoint)"></i>Set to</span>
+      <span><i class="sw-wash" style="background:var(--heat-wash);outline:1px solid var(--heat-ink)"></i>Heating</span>
+    </div>
+    <div class="chart"><canvas id="c-temp" aria-label="Temperature and setpoint over time"></canvas></div>
+  </section>
+
+  <section class="card">
+    <h2>Humidity (%)</h2>
+    <div class="chart small"><canvas id="c-hum" aria-label="Humidity over time"></canvas></div>
+  </section>
+
+  <details>
+    <summary>Show data table</summary>
+    <div class="table-wrap"><table id="tbl"></table></div>
+  </details>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const HOUR = 3600e3, DAY = 24 * HOUR;
+let hours = 24, data = null, charts = {};
+try { const h = +localStorage.getItem("nest-hours"); if ([24, 168, 720].includes(h)) hours = h; } catch {}
+
+const fmtTime = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+const fmtDay = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric" });
+const fmtDate = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+const fmtFull = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+const num = (v, d = 1) => v == null ? "–" : (+v).toFixed(d);
+const dur = ms => { const m = Math.round(ms / 60e3); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
+
+// Ticks on local-time boundaries (midnight / every N hours), not raw UTC milliseconds.
+function localTicks(min, max) {
+  const span = max - min, ticks = [];
+  // step in minutes, chosen so there are roughly 4–10 ticks
+  const stepM = [5, 10, 15, 30, 60, 180, 360, 1440, 1440 * 5].find(m => span / (m * 60e3) <= 10) || 1440 * 10;
+  const d = new Date(min); d.setSeconds(0, 0);
+  if (stepM >= 1440) d.setHours(0, 0);
+  else if (stepM >= 60) { d.setMinutes(0); d.setHours(Math.floor(d.getHours() / (stepM / 60)) * (stepM / 60)); }
+  else d.setMinutes(Math.floor(d.getMinutes() / stepM) * stepM);
+  const step = () => stepM >= 1440 ? d.setDate(d.getDate() + stepM / 1440) : d.setMinutes(d.getMinutes() + stepM);
+  while (d.getTime() < min) step();
+  while (d.getTime() <= max) { ticks.push({ value: d.getTime() }); step(); }
+  return { ticks, fmt: v => stepM < 1440 ? fmtTime.format(v) : stepM === 1440 ? fmtDay.format(v) : fmtDate.format(v) };
+}
+
+function heatingIntervals(rows, now) {
+  const out = []; let start = null;
+  rows.forEach((r, i) => {
+    if (r.hvac === "HEATING" && start == null) start = r.t;
+    if (r.hvac !== "HEATING" && start != null) { out.push([start, r.t]); start = null; }
+  });
+  if (start != null) out.push([start, now]);
+  return out;
+}
+
+// Draws the heating bands behind the lines, and a crosshair at the hovered time.
+const bandsPlugin = {
+  id: "bands",
+  beforeDatasetsDraw(chart) {
+    const bands = chart.options.plugins.bands?.intervals || [];
+    const { ctx, chartArea: a, scales: { x } } = chart;
+    ctx.save(); ctx.fillStyle = css("--heat-wash");
+    for (const [s, e] of bands) {
+      const x0 = Math.max(x.getPixelForValue(s), a.left), x1 = Math.min(x.getPixelForValue(e), a.right);
+      if (x1 > x0) ctx.fillRect(x0, a.top, Math.max(x1 - x0, 1), a.bottom - a.top);
+    }
+    ctx.restore();
+  },
+  afterDatasetsDraw(chart) {
+    const act = chart.tooltip?.getActiveElements?.();
+    if (!act?.length) return;
+    const { ctx, chartArea: a } = chart, px = act[0].element.x;
+    ctx.save(); ctx.strokeStyle = css("--axis"); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(px, a.top); ctx.lineTo(px, a.bottom); ctx.stroke(); ctx.restore();
+  },
+};
+
+function baseOptions(min, max, unit) {
+  const { ticks, fmt } = localTicks(min, max);
+  return {
+    responsive: true, maintainAspectRatio: false, animation: false, normalized: true,
+    interaction: { mode: "index", intersect: false },
+    layout: { padding: { right: 4 } },
+    scales: {
+      x: {
+        type: "linear", min, max,
+        afterBuildTicks: s => { s.ticks = ticks; },
+        ticks: { callback: fmt, color: css("--muted"), maxRotation: 0, autoSkip: true, autoSkipPadding: 16 },
+        grid: { color: css("--grid"), drawTicks: false }, border: { color: css("--axis") },
+      },
+      y: {
+        ticks: { color: css("--muted"), callback: v => `${v}${unit}`, maxTicksLimit: 6 },
+        grid: { color: css("--grid"), drawTicks: false }, border: { display: false },
+        grace: "8%",
+      },
+    },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        backgroundColor: css("--surface"), titleColor: css("--ink"), bodyColor: css("--ink-2"),
+        footerColor: css("--ink-2"), borderColor: css("--border"), borderWidth: 1, padding: 10,
+        usePointStyle: true, boxPadding: 4,
+        callbacks: { title: items => fmtFull.format(items[0].parsed.x) },
+      },
+    },
+  };
+}
+
+function render() {
+  if (!data) return;
+  const { rows, now } = data;
+  // Start at the first reading if there's less history than the selected range.
+  const max = now, min = Math.max(now - hours * HOUR, rows.length ? rows[0].t : 0);
+  Object.values(charts).forEach(c => c.destroy()); charts = {};
+
+  $("empty").hidden = rows.length > 0;
+  document.querySelectorAll(".card").forEach(c => c.hidden = !rows.length);
+  if (!rows.length) return;
+  // Hold the last value until "now" so the lines reach the right edge.
+  const series = [...rows, { ...rows[rows.length - 1], t: now, held: true }];
+  const bands = heatingIntervals(rows, now);
+  const pt = (k) => series.map(r => ({ x: r.t, y: r[k] }));
+
+  const tOpts = baseOptions(min, max, "°");
+  tOpts.plugins.bands = { intervals: bands };
+  tOpts.plugins.tooltip.callbacks.label = c => ` ${c.dataset.label}: ${num(c.parsed.y)} °C`;
+  tOpts.plugins.tooltip.callbacks.footer = items => {
+    const r = series[items[0].dataIndex];
+    return [r.hvac === "HEATING" ? "Heating" : "Not heating", r.src === "event" ? "from event" : r.held ? "" : "from poll"].filter(Boolean);
+  };
+  charts.temp = new Chart($("c-temp"), {
+    type: "line",
+    data: { datasets: [
+      { label: "Temperature", data: pt("temp"), borderColor: css("--temp"), backgroundColor: css("--temp"),
+        borderWidth: 2, pointRadius: 0, pointHoverRadius: 5, pointHitRadius: 8, tension: 0, spanGaps: true },
+      { label: "Set to", data: pt("heat"), borderColor: css("--setpoint"), backgroundColor: css("--setpoint"),
+        borderWidth: 2, borderDash: [6, 4], stepped: "before", pointRadius: 0, pointHoverRadius: 5, spanGaps: true },
+    ] },
+    options: tOpts, plugins: [bandsPlugin],
+  });
+
+  const hOpts = baseOptions(min, max, "%");
+  hOpts.plugins.tooltip.callbacks.label = c => ` Humidity: ${num(c.parsed.y, 0)} %`;
+  charts.hum = new Chart($("c-hum"), {
+    type: "line",
+    data: { datasets: [
+      { label: "Humidity", data: pt("hum"), borderColor: css("--hum"), backgroundColor: css("--hum"),
+        borderWidth: 2, stepped: "before", pointRadius: 0, pointHoverRadius: 5, spanGaps: true },
+    ] },
+    options: hOpts, plugins: [bandsPlugin],
+  });
+
+  // Tiles
+  const last = rows[rows.length - 1];
+  $("title").textContent = `${last.name || "Thermostat"} thermostat`;
+  $("t-temp").textContent = `${num(last.temp)}°`;
+  $("t-sp").textContent = last.mode === "OFF" ? "Off" : `${num(last.heat)}°`;
+  $("t-mode").textContent = [last.mode, last.eco && last.eco !== "OFF" ? "Eco" : ""].filter(Boolean).join(" · ") || " ";
+  const heating = last.hvac === "HEATING";
+  $("t-status").innerHTML = heating
+    ? `<svg viewBox="0 0 24 24" fill="none" stroke="${css("--heat-ink")}" stroke-width="2" stroke-linecap="round"><path d="M12 3c2 3 5 5 5 9a5 5 0 0 1-10 0c0-2 1-3 2-4 0 2 1 3 2 3 0-3-1-5 1-8z"/></svg>Heating`
+    : `<svg viewBox="0 0 24 24" fill="none" stroke="${css("--muted")}" stroke-width="2"><circle cx="12" cy="12" r="8"/></svg>Idle`;
+  let since = last.t;
+  for (let i = rows.length - 1; i >= 0 && (rows[i].hvac === "HEATING") === heating; i--) since = rows[i].t;
+  $("t-since").textContent = `for ${dur(now - since)}`;
+  $("t-hum").textContent = `${num(last.hum, 0)}%`;
+  const heatMs = bands.reduce((s, [a, b]) => s + Math.max(0, Math.min(b, max) - Math.max(a, min)), 0);
+  $("t-heat").textContent = dur(heatMs).replace(" min", "m").replace(" h ", "h ");
+  $("t-heat-sub").textContent = `${Math.round(heatMs / (max - min) * 100)}% of the last ${hours === 24 ? "24 hours" : hours / 24 + " days"}`;
+  $("updated").textContent = `Last change ${fmtFull.format(last.t)} · refreshed ${fmtTime.format(now)}`;
+
+  // Table (newest first, capped)
+  const head = "<tr><th>Time</th><th>Temp °C</th><th>Set to °C</th><th>Humidity %</th><th>Status</th><th>Mode</th><th>Source</th></tr>";
+  $("tbl").innerHTML = head + rows.slice(-300).reverse().map(r =>
+    `<tr><td>${fmtFull.format(r.t)}</td><td>${num(r.temp)}</td><td>${num(r.heat)}</td><td>${num(r.hum, 0)}</td>` +
+    `<td>${r.hvac ?? "–"}</td><td>${r.mode ?? "–"}${r.eco && r.eco !== "OFF" ? " (eco)" : ""}</td><td>${r.src}</td></tr>`).join("");
+}
+
+async function load() {
+  try {
+    const r = await fetch(`api/readings?hours=${hours}`, { cache: "no-store" });
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+    data = await r.json();
+    render();
+  } catch (e) {
+    $("updated").innerHTML = `<span class="err">Couldn't load data: ${String(e.message || e).replace(/</g, "&lt;")}</span>`;
+  }
+}
+
+document.querySelectorAll(".chip").forEach(b => {
+  b.setAttribute("aria-pressed", String(+b.dataset.hours === hours));
+  b.addEventListener("click", () => {
+    hours = +b.dataset.hours;
+    document.querySelectorAll(".chip").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    try { localStorage.setItem("nest-hours", hours); } catch {}
+    load();
+  });
+});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+load();
+setInterval(load, 60e3);
+</script>
+</body>
+</html>
