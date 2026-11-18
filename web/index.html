@@ -82,6 +82,11 @@
                    border-radius: 6px; padding: 2px 6px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
   .legend button:hover { border-color: var(--border); }
   .legend button[aria-pressed="false"] { opacity: .45; text-decoration: line-through; }
+  .legend .grp { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted);
+                 padding: 3px 4px 3px 0; display: inline-flex; align-items: center; }
+  .legend .grp:not(:first-child) { margin-left: 14px; padding-left: 14px; border-left: 1px solid var(--grid); }
+  .tip .g { font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
+  .sw-line.thick { border-top-width: 4px; }
   .legend .static { font-size: 13px; color: var(--ink-2); padding: 2px 6px; display: inline-flex; align-items: center; gap: 6px; }
   .sw-line { width: 18px; height: 0; border-top: 2px solid; }
   .sw-dash { width: 18px; height: 0; border-top: 2px dashed; }
@@ -135,7 +140,7 @@
     <div class="fan-msg" id="fan-hint" style="color:var(--muted)">0 stops the fan. Changes are confirmed by the thermostat, usually within a minute. Scheduled circulation isn't reported by the Nest API, so it doesn't show here.</div>
   </section>
 
-  <h2 class="section">Rooms</h2>
+  <h2 class="section">Rooms · Zigbee sensors</h2>
   <section class="tiles" id="rooms" aria-label="Room sensors"><div class="tile"><div class="sub">Loading…</div></div></section>
 
   <div class="controls" role="group" aria-label="Time range">
@@ -274,9 +279,12 @@ function makeChart(canvasId, tipId, datasets, { min, max, unit, digits, bands, f
     if (px < a.left || px > a.right) return leave();
     const t = chart.scales.x.getValueForPixel(px);
     chart.$hoverX = px; chart.draw();
+    let grp = null;
     const rows = chart.data.datasets.filter(d => !d.hidden).map(d => {
       const v = valueAt(d.data, t);
-      return v == null ? "" : `<div class="r">${d.borderDash ? '<i class="sw-dash" style="border-color:' + d.borderColor + '"></i>' : '<i class="dot" style="background:' + d.borderColor + '"></i>'}${esc(d.label)}<b>${num(v, digits)}${unit}</b></div>`;
+      if (v == null) return "";
+      const head = d.group !== grp ? `<div class="g">${esc(grp = d.group)}</div>` : "";
+      return `${head}<div class="r">${swatch(d)}${esc(d.label)}<b>${num(v, digits)}${unit}</b></div>`;
     }).join("");
     const foot = footer ? footer(t) : "";
     tip.innerHTML = `<div class="t">${fmtFull.format(t)}</div>${rows}${foot ? `<div class="f">${foot}</div>` : ""}`;
@@ -289,11 +297,17 @@ function makeChart(canvasId, tipId, datasets, { min, max, unit, digits, bands, f
   return chart;
 }
 
-function legend(elId, datasets, extras = "") {
-  $(elId).innerHTML = datasets.map((d, i) =>
-    `<button type="button" data-key="${esc(d.key)}" aria-pressed="${!d.hidden}">` +
-    (d.borderDash ? `<i class="sw-dash" style="border-color:${d.borderColor}"></i>` : `<i class="sw-line" style="border-color:${d.borderColor}"></i>`) +
-    `${esc(d.label)}</button>`).join("") + extras;
+const swatch = d => d.borderDash ? `<i class="sw-dash" style="border-color:${d.borderColor}"></i>`
+  : `<i class="sw-line${d.borderWidth >= 3 ? " thick" : ""}" style="border-color:${d.borderColor}"></i>`;
+
+// Legend in labelled groups (Nest / Zigbee sensors); extras[group] adds non-toggle items to a group.
+function legend(elId, datasets, extras = {}) {
+  let html = "", grp = null;
+  datasets.forEach((d, i) => {
+    if (d.group !== grp) { if (grp != null) html += extras[grp] || ""; grp = d.group; html += `<span class="grp">${esc(grp)}</span>`; }
+    html += `<button type="button" data-key="${esc(d.key)}" aria-pressed="${!d.hidden}">${swatch(d)}${esc(d.label)}</button>`;
+  });
+  $(elId).innerHTML = html + (grp != null ? extras[grp] || "" : "");
   $(elId).querySelectorAll("button").forEach(b => b.onclick = () => {
     const k = b.dataset.key;
     hidden.has(k) ? hidden.delete(k) : hidden.add(k);
@@ -322,18 +336,19 @@ function render() {
   const nestName = "Nest (active sensor)";
 
   // Temperature: Nest active sensor, each room, and the setpoint as a neutral dashed reference.
+  const NEST = "Nest", ZIG = "Zigbee sensors";
   const tSets = [
-    line("nest", nestName, rows.filter(r => r.temp != null).map(r => ({ x: r.t, y: r.temp })), color("nest")),
-    ...zig.map(z => line(`z:${z.id}`, z.name, z.points.filter(p => p[1] != null).map(p => ({ x: p[0], y: p[1] })), color(z.name))),
-    line("setpoint", "Set to", rows.filter(r => r.heat != null && r.mode !== "OFF").map(r => ({ x: r.t, y: r.heat })), css("--ink-2"), { borderDash: [6, 4], borderWidth: 1.5 }),
+    line("nest", nestName, rows.filter(r => r.temp != null).map(r => ({ x: r.t, y: r.temp })), color("nest"), { borderWidth: 3.5, group: NEST }),
+    line("setpoint", "Set to", rows.filter(r => r.heat != null && r.mode !== "OFF").map(r => ({ x: r.t, y: r.heat })), css("--ink-2"), { borderDash: [6, 4], borderWidth: 1.5, group: NEST }),
+    ...zig.map(z => line(`z:${z.id}`, `${z.name} (Z)`, z.points.filter(p => p[1] != null).map(p => ({ x: p[0], y: p[1] })), color(z.name), { group: ZIG })),
   ];
-  legend("leg-temp", tSets, `<span class="static"><i class="sw-wash"></i>Heating</span>`);
+  legend("leg-temp", tSets, { [NEST]: `<span class="static"><i class="sw-wash"></i>Heating</span>` });
   charts.temp = makeChart("c-temp", "tip-temp", tSets, { min, max, unit: "°", digits: 1, bands,
     footer: t => bands.some(([s, e]) => t >= s && t < e) ? "Furnace heating" : "Furnace not heating" });
 
   const hSets = [
-    line("nest", nestName, rows.filter(r => r.hum != null).map(r => ({ x: r.t, y: r.hum })), color("nest")),
-    ...zig.map(z => line(`z:${z.id}`, z.name, z.points.filter(p => p[2] != null).map(p => ({ x: p[0], y: p[2] })), color(z.name))),
+    line("nest-hum", "Thermostat (hallway)", rows.filter(r => r.hum != null).map(r => ({ x: r.t, y: r.hum })), color("nest"), { borderWidth: 3.5, group: NEST }),
+    ...zig.map(z => line(`z:${z.id}`, `${z.name} (Z)`, z.points.filter(p => p[2] != null).map(p => ({ x: p[0], y: p[2] })), color(z.name), { group: ZIG })),
   ].filter(d => d.data.length);
   legend("leg-hum", hSets);
   charts.hum = makeChart("c-hum", "tip-hum", hSets, { min, max, unit: "%", digits: 0, bands });
