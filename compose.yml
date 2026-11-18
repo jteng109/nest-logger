@@ -1,4 +1,4 @@
-# Nest thermostat logger + web UI. Data (db, OAuth token, Pub/Sub key) lives in ./data.
+# Nest thermostat + Zigbee room sensors logger, and web UI. Data (db, OAuth token, Pub/Sub key) lives in ./data.
 # Web UI: https://nest.tengs.ca — LAN only (Caddy refuses Cloudflare-tunnel and non-private requests)
 services:
   nest-logger:
@@ -12,8 +12,12 @@ services:
       - NEST_DB_FILE=/data/nest.db
       - NEST_TOKEN_FILE=/data/nest_token.json
       - GOOGLE_APPLICATION_CREDENTIALS=/data/pubsub-key.json
+      - MQTT_HOST=mochi-mqtt          # zigbee2mqtt's broker
     volumes:
       - ./data:/data
+    networks:
+      - default                       # internet (Google APIs)
+      - zigbee2mqtt_default           # reach mochi-mqtt
     restart: unless-stopped
     deploy:
       resources:
@@ -25,12 +29,14 @@ services:
     container_name: nest-web
     command: ["python", "web/server.py"]
     user: "1000:1000"
+    env_file: .env                    # Nest credentials for the fan control
     environment:
       - NEST_DB_FILE=/data/nest.db
+      - NEST_TOKEN_FILE=/data/nest_token.json
       - NEST_WEB_HOST=0.0.0.0
       - NEST_WEB_PORT=8087
     volumes:
-      - ./data:/data:ro
+      - ./data:/data                  # read-write: the fan control may refresh the OAuth token (file-locked)
     # Port exposed only on caddy_network, not on host
     networks:
       - caddy_network
@@ -44,4 +50,6 @@ services:
 
 networks:
   caddy_network:
+    external: true
+  zigbee2mqtt_default:
     external: true

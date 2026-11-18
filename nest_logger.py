@@ -15,17 +15,24 @@ Setup (once):
     python nest_logger.py auth      # prints the consent link, then paste the google.com URL you land on
     python nest_logger.py devices   # sanity check: dump current device state
     python nest_logger.py run       # events + poll (default every 30 min when events are on, 5 min otherwise)
+    python nest_logger.py import-zigbee DIR   # one-off: load zigbee2mqtt JSONL history (DIR/<device>/*.jsonl)
+
+    # Zigbee room sensors (optional): set MQTT_HOST and `run` also records zigbee2mqtt messages.
+    export MQTT_HOST="mochi-mqtt"   # MQTT_PORT (1883), MQTT_TOPIC (zigbee2mqtt/#), MQTT_USER/MQTT_PASSWORD if needed
 
 Tables in nest.db:
     readings — one full snapshot per poll or per event (source = 'poll' | 'event')
     events   — every raw Pub/Sub message, for anything you want to dig into later
+    zigbee   — one row per zigbee2mqtt device message (temperature, humidity, battery, raw payload)
 
 All timestamps are UTC, formatted like 2026-11-17T10:42:56.123+00:00 so they sort correctly as text.
 
 Token is stored in nest_token.json (chmod 600). Keep it, the key file and your secret private.
 """
+import fcntl
 import json
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -46,6 +53,10 @@ TOKEN_FILE = Path(os.environ.get("NEST_TOKEN_FILE", "nest_token.json"))
 DB_FILE = Path(os.environ.get("NEST_DB_FILE", "nest.db"))
 _default_poll = "1800" if SUBSCRIPTION else "300"
 POLL_SECONDS = int(os.environ.get("NEST_POLL_SECONDS", _default_poll))  # SDM rate limits: stay >= 60s
+MQTT_HOST = os.environ.get("MQTT_HOST", "")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
+MQTT_TOPIC = os.environ.get("MQTT_TOPIC", "zigbee2mqtt/#")
+MQTT_BASE = MQTT_TOPIC.split("/")[0]
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 API = "https://smartdevicemanagement.googleapis.com/v1"
@@ -129,8 +140,22 @@ def cmd_auth():
 _token_lock = threading.Lock()
 
 
+class _FileLock:
+    """Cross-process lock so the logger and web containers never refresh the token at the same time."""
+    def __init__(self, path):
+        self.path = path
+
+    def __enter__(self):
+        self.f = open(self.path, "a")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.f, fcntl.LOCK_UN)
+        self.f.close()
+
+
 def access_token():
-    with _token_lock:
+    with _token_lock, _FileLock(TOKEN_FILE.with_name(TOKEN_FILE.name + ".lock")):
         if not TOKEN_FILE.exists():
             sys.exit(f"No {TOKEN_FILE}. Run: python {sys.argv[0]} auth")
         tok = json.loads(TOKEN_FILE.read_text())
@@ -157,6 +182,24 @@ def list_devices():
                      headers={"Authorization": f"Bearer {access_token()}"}, timeout=30)
     r.raise_for_status()
     return r.json().get("devices", [])
+
+
+MAX_FAN_SECONDS = 43200  # SDM limit for Fan.SetTimer
+
+
+def set_fan_timer(device_id, seconds):
+    """Run the fan for `seconds` (1..43200), or stop it with 0. Returns once the command is accepted;
+    the new state arrives later as an event (it took ~45 s in testing)."""
+    seconds = int(seconds)
+    if not 0 <= seconds <= MAX_FAN_SECONDS:
+        raise ValueError(f"duration must be 0..{MAX_FAN_SECONDS} seconds")
+    params = {"timerMode": "ON", "duration": f"{seconds}s"} if seconds else {"timerMode": "OFF"}
+    r = requests.post(f"{API}/enterprises/{PROJECT_ID}/devices/{device_id}:executeCommand",
+                      headers={"Authorization": f"Bearer {access_token()}"},
+                      json={"command": "sdm.devices.commands.Fan.SetTimer", "params": params}, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"Fan command failed ({r.status_code}): {r.text[:300]}")
+    return params
 
 
 # ---------- storage ----------
@@ -187,6 +230,18 @@ CREATE TABLE IF NOT EXISTS events (
     payload       TEXT NOT NULL       -- full message JSON
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE TABLE IF NOT EXISTS zigbee (
+    ts            TEXT NOT NULL,      -- UTC ISO8601, when the message was received
+    device_id     TEXT NOT NULL,      -- IEEE address (0x…) when known, else the friendly name
+    name          TEXT,               -- friendly name without the address, e.g. '3rd Floor'
+    temperature   REAL,
+    humidity      REAL,
+    battery       REAL,
+    linkquality   REAL,
+    payload       TEXT NOT NULL,      -- full message JSON
+    UNIQUE (device_id, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_zigbee_ts ON zigbee(ts);
 """
 
 
@@ -218,6 +273,14 @@ class Store:
                                   (event_id, ts, device_id, json.dumps(traits) if traits else None, payload))
             self.db.commit()
             return cur.rowcount == 1  # False = duplicate delivery
+
+    def insert_zigbee(self, rows):
+        """rows: iterable of zigbee_row() tuples. Duplicates (same device + ts) are ignored."""
+        with self.lock:
+            before = self.db.total_changes
+            self.db.executemany("INSERT OR IGNORE INTO zigbee VALUES (?,?,?,?,?,?,?,?)", rows)
+            self.db.commit()
+            return self.db.total_changes - before
 
 
 def parse_traits(t):
@@ -300,6 +363,83 @@ def start_subscriber(store):
     return future
 
 
+# ---------- zigbee (MQTT) ----------
+
+_IEEE = re.compile(r"0x[0-9a-fA-F]{16}")
+
+
+def zigbee_row(ts, topic, payload):
+    """Turn one zigbee2mqtt device message into a row tuple, or None if it isn't a device state message."""
+    parts = topic.split("/")
+    if len(parts) != 2 or parts[0] != MQTT_BASE or parts[1] == "bridge" or not isinstance(payload, dict):
+        return None  # skips bridge/…, …/set, …/get, …/availability and empty (deleted) payloads
+    friendly = parts[1]
+    m = _IEEE.search(friendly)
+    device_id = m.group(0).lower() if m else friendly
+    name = _IEEE.sub("", friendly).strip(" _-") or device_id
+    num = lambda k: payload.get(k) if isinstance(payload.get(k), (int, float)) else None
+    return (ts, device_id, name, num("temperature"), num("humidity"), num("battery"), num("linkquality"),
+            json.dumps(payload, separators=(",", ":")))
+
+
+def start_mqtt(store):
+    try:
+        import paho.mqtt.client as mqtt
+    except ImportError:
+        sys.exit("Zigbee logging needs: pip install paho-mqtt")
+
+    def on_connect(client, userdata, flags, reason_code, properties=None):
+        log(f"mqtt connected to {MQTT_HOST}:{MQTT_PORT} ({reason_code}); subscribing {MQTT_TOPIC}")
+        client.subscribe(MQTT_TOPIC)
+
+    def on_message(client, userdata, msg):
+        if msg.retain:  # replayed last-known state on (re)connect, not a new reading
+            return
+        try:
+            payload = json.loads(msg.payload or b"null")
+        except ValueError:
+            return
+        row = zigbee_row(now_iso(), msg.topic, payload)
+        if row:
+            try:
+                store.insert_zigbee([row])
+            except sqlite3.Error as e:
+                log("zigbee insert ERROR:", e)
+
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"nest-logger-{os.getpid()}")
+    if os.environ.get("MQTT_USER"):
+        client.username_pw_set(os.environ["MQTT_USER"], os.environ.get("MQTT_PASSWORD"))
+    client.on_connect = on_connect
+    client.on_message = on_message
+    client.reconnect_delay_set(1, 60)
+    client.connect_async(MQTT_HOST, MQTT_PORT, keepalive=60)
+    client.loop_start()  # background thread; reconnects on its own
+    return client
+
+
+def cmd_import_zigbee():
+    """Load zigbee2mqtt JSONL history: DIR/<device folder>/*.jsonl with lines {ts, topic, payload}."""
+    if len(sys.argv) != 3:
+        sys.exit(f"usage: python {sys.argv[0]} import-zigbee DIR")
+    root = Path(sys.argv[2])
+    store = Store(DB_FILE)
+    total = added = 0
+    for f in sorted(root.glob("*/*.jsonl")):
+        batch = []
+        with open(f, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                row = zigbee_row(norm_ts(r.get("ts")), r.get("topic", ""), r.get("payload"))
+                if row:
+                    batch.append(row)
+        total += len(batch)
+        added += store.insert_zigbee(batch)
+    print(f"read {total} zigbee messages from {root}, added {added} new rows to {DB_FILE}")
+
+
 # ---------- commands ----------
 
 def cmd_devices():
@@ -314,8 +454,11 @@ def cmd_run():
     store = Store(DB_FILE)
     poll_once(store)  # seeds full state (and SDM needs one devices.list before it sends events)
     future = start_subscriber(store) if SUBSCRIPTION else None
+    if MQTT_HOST:
+        start_mqtt(store)
     log(f"logging to {DB_FILE}; polling every {POLL_SECONDS}s"
-        + ("" if future else " (events off — set NEST_PUBSUB_SUBSCRIPTION to enable)"))
+        + ("" if future else " (events off — set NEST_PUBSUB_SUBSCRIPTION to enable)")
+        + ("" if MQTT_HOST else " (zigbee off — set MQTT_HOST to enable)"))
     try:
         while True:
             time.sleep(POLL_SECONDS)
@@ -332,7 +475,7 @@ def cmd_run():
 
 
 if __name__ == "__main__":
-    cmds = {"auth": cmd_auth, "devices": cmd_devices, "run": cmd_run}
-    if len(sys.argv) != 2 or sys.argv[1] not in cmds:
+    cmds = {"auth": cmd_auth, "devices": cmd_devices, "run": cmd_run, "import-zigbee": cmd_import_zigbee}
+    if len(sys.argv) < 2 or sys.argv[1] not in cmds:
         sys.exit(__doc__)
     cmds[sys.argv[1]]()
