@@ -1,6 +1,38 @@
-# Nest thermostat + Zigbee room sensors logger, and web UI. Data (db, OAuth token, Pub/Sub key) lives in ./data.
+# Home climate stack: Zigbee2MQTT + MQTT broker, Nest + Zigbee logger, and web UI.
+# All data (SQLite db, OAuth token, Pub/Sub key, Zigbee2MQTT config/network key) lives in ./data (gitignored).
 # Web UI: https://nest.tengs.ca — LAN only (Caddy refuses Cloudflare-tunnel and non-private requests)
+# Zigbee2MQTT UI: https://zigbee.tengs.ca (Caddy → zigbee2mqtt:8080)
 services:
+  mochi-mqtt:
+    image: mochimqtt/server:latest
+    container_name: mochi-mqtt
+    restart: unless-stopped
+    ports:
+      - "1883:1883"                   # MQTT for LAN clients
+      - "9095:8080"                   # kept from the previous setup
+    volumes:
+      - ./mqtt/mochi-config.yaml:/config.yaml
+
+  zigbee2mqtt:
+    image: koenkk/zigbee2mqtt:latest
+    container_name: zigbee2mqtt
+    restart: unless-stopped
+    depends_on:
+      - mochi-mqtt
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0     # Zigbee coordinator (zstack)
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./data/zigbee2mqtt:/app/data  # configuration.yaml (network key!), coordinator backup, device db
+    environment:
+      - TZ=America/Vancouver
+      - ZIGBEE2MQTT_CONFIG_MQTT_SERVER=mqtt://mochi-mqtt:1883
+      - ZIGBEE2MQTT_CONFIG_SERIAL_PORT=/dev/ttyUSB0
+    networks:
+      - caddy_network
+      - default
+
   nest-logger:
     build: .
     image: nest-logger
@@ -8,16 +40,15 @@ services:
     command: ["python", "nest_logger.py", "run"]
     user: "1000:1000"
     env_file: .env
+    depends_on:
+      - mochi-mqtt
     environment:
       - NEST_DB_FILE=/data/nest.db
       - NEST_TOKEN_FILE=/data/nest_token.json
       - GOOGLE_APPLICATION_CREDENTIALS=/data/pubsub-key.json
-      - MQTT_HOST=mochi-mqtt          # zigbee2mqtt's broker
+      - MQTT_HOST=mochi-mqtt
     volumes:
       - ./data:/data
-    networks:
-      - default                       # internet (Google APIs)
-      - zigbee2mqtt_default           # reach mochi-mqtt
     restart: unless-stopped
     deploy:
       resources:
@@ -50,6 +81,4 @@ services:
 
 networks:
   caddy_network:
-    external: true
-  zigbee2mqtt_default:
     external: true
